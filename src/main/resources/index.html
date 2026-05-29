@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kalshi Live Baseball</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #181b22;
+    --panel-2: #1f232c;
+    --line: #2a2f3a;
+    --text: #e6e8ec;
+    --muted: #8b93a3;
+    --accent: #4ea1ff;
+    --live: #ff4d4f;
+    --green: #2ecc71;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    position: sticky; top: 0; z-index: 5;
+    display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+    padding: 16px 24px;
+    background: linear-gradient(180deg, #12151b, #0f1115);
+    border-bottom: 1px solid var(--line);
+  }
+  header h1 { font-size: 18px; margin: 0; letter-spacing: .3px; }
+  header .meta { color: var(--muted); font-size: 12px; }
+  .env-badge {
+    font-size: 11px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase;
+    padding: 3px 9px; border-radius: 999px;
+    background: rgba(78,161,255,.15); color: var(--accent); border: 1px solid rgba(78,161,255,.45);
+  }
+  .env-badge.demo {
+    background: rgba(255,176,32,.15); color: #ffb020; border-color: rgba(255,176,32,.55);
+  }
+  .balance {
+    margin-left: auto; font-size: 13px; color: var(--text);
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  .balance .lbl { color: var(--muted); }
+  .balance .amt { font-weight: 600; }
+  .balance .total { color: var(--green); }
+  header .dot { color: var(--green); }
+  main { padding: 20px 24px 40px; max-width: 1200px; margin: 0 auto; }
+
+  .series { margin-bottom: 32px; }
+  .series-head {
+    display: flex; align-items: baseline; gap: 10px;
+    margin: 8px 0 14px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--line);
+  }
+  .series-head h2 { margin: 0; font-size: 15px; }
+  .series-head .ticker {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--accent); font-size: 12px;
+  }
+  .series-head .count { color: var(--muted); font-size: 12px; margin-left: auto; }
+
+  .grid {
+    display: grid; gap: 14px;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 14px 16px;
+    transition: border-color .15s;
+  }
+  .card.live { border-color: rgba(255,77,79,.55); box-shadow: 0 0 0 1px rgba(255,77,79,.15); }
+  .card-top { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .badge {
+    font-size: 10px; font-weight: 700; letter-spacing: .5px;
+    padding: 2px 7px; border-radius: 999px; text-transform: uppercase;
+  }
+  .badge.live { background: var(--live); color: #fff; animation: pulse 1.6s infinite; }
+  .badge.open { background: var(--panel-2); color: var(--muted); border: 1px solid var(--line); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .55; } }
+  .state { color: var(--muted); font-size: 12px; margin-left: auto; }
+
+  .matchup { display: flex; align-items: center; justify-content: space-between; margin: 8px 0 10px; }
+  .matchup .team-line { font-size: 15px; font-weight: 600; }
+  .matchup .score { font-variant-numeric: tabular-nums; font-size: 20px; font-weight: 700; }
+  .matchup .score .sep { color: var(--muted); margin: 0 6px; font-weight: 400; }
+  .matchup .score.none { font-size: 12px; font-weight: 400; color: var(--muted); }
+
+  table.book { width: 100%; border-collapse: collapse; margin-top: 6px; }
+  table.book th {
+    text-align: right; font-weight: 500; color: var(--muted);
+    font-size: 11px; padding: 4px 6px; border-bottom: 1px solid var(--line);
+  }
+  table.book th.l, table.book td.l { text-align: left; }
+  table.book td { padding: 6px; font-variant-numeric: tabular-nums; border-bottom: 1px solid var(--panel-2); }
+  table.book tr:last-child td { border-bottom: none; }
+  .team { display: flex; align-items: center; gap: 6px; }
+  .team .ha { font-size: 10px; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+  .win-bar { position: relative; height: 6px; background: var(--panel-2); border-radius: 4px; overflow: hidden; width: 70px; display: inline-block; vertical-align: middle; margin-right: 6px; }
+  .win-bar > span { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent); }
+  .market-id { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
+
+  /* trading-bot activity row */
+  .botline {
+    margin-top: 10px; padding: 6px 8px; border-radius: 8px;
+    background: rgba(46,204,113,.10); border: 1px solid rgba(46,204,113,.30);
+    font-size: 12px; color: var(--text); font-variant-numeric: tabular-nums;
+  }
+  .botline .pos { color: var(--green); font-weight: 600; }
+  .botline .neg { color: var(--live); font-weight: 600; }
+
+  .empty, .error { padding: 40px; text-align: center; color: var(--muted); }
+  .error { color: #ff8a8a; }
+
+  /* brief highlight when a price ticks via the live stream */
+  @keyframes tickflash { from { background: rgba(78,161,255,.40); } to { background: transparent; } }
+  .tick { animation: tickflash .7s ease-out; }
+  /* resting order size shown under each price */
+  table.book td .sz { display: block; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; margin-top: 1px; }
+  .live-dot { color: var(--green); transition: color .2s; }
+  .live-dot.stale { color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>⚾ Kalshi Live Baseball</h1>
+  <span class="env-badge" id="env" title="Kalshi environment">—</span>
+  <span class="meta"><span class="dot live-dot stale">●</span> live bid/ask stream</span>
+  <span class="meta" id="updated"></span>
+  <span class="balance" id="balance"></span>
+</header>
+<main id="root"><div class="empty">Loading…</div></main>
+
+<script>
+const fmtCents = c => (c > 0 ? c + "¢" : "—");
+const fmtSize = n => (n > 0 ? n.toLocaleString() + " ct" : "—");
+const fmtUsd = c => "$" + (c / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+const clampPct = w => Math.max(0, Math.min(100, w));
+
+function quoteRow(q) {
+  return `
+    <tr data-mid="${q.marketId}">
+      <td class="l">
+        <div class="team">
+          <span>${q.name ?? q.abbrev}</span>
+          <span class="ha">${q.home ? "H" : "A"}</span>
+        </div>
+        <div class="market-id">${q.marketId}</div>
+      </td>
+      <td><span class="bid">${fmtCents(q.bid)}</span><span class="sz bidsz">${fmtSize(q.bidSize)}</span></td>
+      <td><span class="ask">${fmtCents(q.ask)}</span><span class="sz asksz">${fmtSize(q.askSize)}</span></td>
+      <td class="winc">
+        <span class="win-bar"><span class="winfill" style="width:${clampPct(q.win)}%"></span></span>
+        <span class="winpct">${q.win}%</span>
+      </td>
+    </tr>`;
+}
+
+// Patch one market's prices in place (no full re-render) and flash the change.
+function applyTick(m) {
+  const row = document.querySelector(`tr[data-mid="${(window.CSS && CSS.escape) ? CSS.escape(m.marketId) : m.marketId}"]`);
+  if (!row) return;
+  setCell(row.querySelector(".bid"), fmtCents(m.bid));
+  setCell(row.querySelector(".ask"), fmtCents(m.ask));
+  if (typeof m.bidSize === "number") setCell(row.querySelector(".bidsz"), fmtSize(m.bidSize));
+  if (typeof m.askSize === "number") setCell(row.querySelector(".asksz"), fmtSize(m.askSize));
+  const fill = row.querySelector(".winfill");
+  if (fill) fill.style.width = clampPct(m.win) + "%";
+  const pct = row.querySelector(".winpct");
+  if (pct) pct.textContent = m.win + "%";
+}
+
+function setCell(cell, text) {
+  if (!cell || cell.textContent === text) return;
+  cell.textContent = text;
+  cell.classList.remove("tick");
+  void cell.offsetWidth;      // restart the CSS animation
+  cell.classList.add("tick");
+}
+
+function scoreHtml(g) {
+  if (!g.hasScore) return `<div class="score none">no score yet</div>`;
+  return `<div class="score">${g.awayScore}<span class="sep">–</span>${g.homeScore}</div>`;
+}
+
+function botLine(b) {
+  const d = b.expectedPayoffDollars;
+  const cls = d >= 0 ? "pos" : "neg";
+  const payoff = (d >= 0 ? "+$" : "−$") + Math.abs(d).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const held = b.contracts > 0 ? `${b.contracts} ct @ ${b.avgPriceCents}¢` : "no fills yet";
+  return `<div class="botline">🤖 <b>${b.side}</b> · ${b.bidsPlaced} bids · ${held} · WP ${b.modelWinPct}% · exp payoff <span class="${cls}">${payoff}</span></div>`;
+}
+
+function card(g) {
+  const badge = g.live
+    ? `<span class="badge live">live</span>`
+    : `<span class="badge open">open</span>`;
+  return `
+    <div class="card ${g.live ? "live" : ""}">
+      <div class="card-top">
+        ${badge}
+        <span class="state">${g.state}</span>
+      </div>
+      <div class="matchup">
+        <div class="team-line">${g.away.abbrev} @ ${g.home.abbrev}</div>
+        ${scoreHtml(g)}
+      </div>
+      <table class="book">
+        <thead><tr><th class="l">Team / Market</th><th>Bid&nbsp;/&nbsp;size</th><th>Ask&nbsp;/&nbsp;size</th><th>Win&nbsp;%</th></tr></thead>
+        <tbody>${quoteRow(g.away)}${quoteRow(g.home)}</tbody>
+      </table>
+      ${g.bot ? botLine(g.bot) : ""}
+    </div>`;
+}
+
+function seriesBlock(s) {
+  const cards = s.games.map(card).join("");
+  return `
+    <section class="series">
+      <div class="series-head">
+        <h2>${s.title}</h2>
+        <span class="ticker">${s.ticker}</span>
+        <span class="count">${s.liveCount} live / ${s.total} tradeable</span>
+      </div>
+      <div class="grid">${cards}</div>
+    </section>`;
+}
+
+function renderBalance(acct) {
+  const el = document.getElementById("balance");
+  if (!el) return;
+  if (acct && acct.available) {
+    el.innerHTML =
+      `<span class="lbl">Cash</span> <span class="amt">${fmtUsd(acct.cashCents)}</span>` +
+      ` &nbsp;·&nbsp; <span class="lbl">Portfolio</span> <span class="amt">${fmtUsd(acct.portfolioCents)}</span>` +
+      ` &nbsp;·&nbsp; <span class="lbl">Total</span> <span class="amt total">${fmtUsd(acct.totalCents)}</span>`;
+  } else {
+    el.innerHTML = `<span class="lbl">balance needs API key</span>`;
+  }
+}
+
+async function refresh() {
+  try {
+    const res = await fetch("/api/games", { cache: "no-store" });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+
+    document.getElementById("updated").textContent = "updated " + data.generatedAt;
+    const envEl = document.getElementById("env");
+    if (envEl && data.env) {
+      envEl.textContent = data.env;
+      envEl.classList.toggle("demo", data.env === "demo");
+    }
+    renderBalance(data.account);
+    const root = document.getElementById("root");
+    if (!data.series || data.series.length === 0) {
+      root.innerHTML = `<div class="empty">No tradeable baseball games right now.</div>`;
+      return;
+    }
+    root.innerHTML = data.series.map(seriesBlock).join("");
+  } catch (e) {
+    document.getElementById("root").innerHTML =
+      `<div class="error">Failed to load markets: ${e.message}</div>`;
+  }
+}
+
+// Real-time bid/ask via Server-Sent Events; the page patches in place.
+function connectStream() {
+  const dot = document.querySelector(".live-dot");
+  const updated = document.getElementById("updated");
+  const es = new EventSource("/api/stream");
+  es.onopen = () => {
+    console.log("[sse] connected to /api/stream");
+    if (dot) dot.classList.remove("stale");
+  };
+  es.onmessage = (ev) => {
+    try {
+      applyTick(JSON.parse(ev.data));
+      if (updated) updated.textContent = "live · last tick " + new Date().toLocaleTimeString();
+    } catch (e) { console.warn("[sse] bad message", ev.data, e); }
+  };
+  es.onerror = () => {                       // EventSource auto-reconnects
+    console.warn("[sse] disconnected; retrying…");
+    if (dot) dot.classList.add("stale");
+  };
+}
+
+// Initial paint + a slow poll that only refreshes the game list & scores
+// (prices come live over the stream).
+refresh();
+setInterval(refresh, 25000);
+connectStream();
+</script>
+</body>
+</html>
