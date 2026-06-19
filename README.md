@@ -1,4 +1,4 @@
-# ⚾ Kalshi Live Baseball
+wr# ⚾ Kalshi Live Baseball
 
 A real-time dashboard and automated trading bot for **Kalshi** MLB game markets. It
 lists every baseball game currently tradeable on Kalshi, streams live bid/ask prices,

@@ -44,3 +44,5 @@ build/
 *.pem
 *.key
 .env
+### Kalshi credentials launcher (key IDs / paths) ###
+kalshi-env.sh
