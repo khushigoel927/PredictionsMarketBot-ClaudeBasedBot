@@ -22,6 +22,14 @@
             <artifactId>gson</artifactId>
             <version>2.11.0</version>
         </dependency>
+
+        <!-- Claude API: AI-driven trade decisions (ClaudeDecider). Brings Jackson
+             transitively, used for the structured-output decision schema. -->
+        <dependency>
+            <groupId>com.anthropic</groupId>
+            <artifactId>anthropic-java</artifactId>
+            <version>2.34.0</version>
+        </dependency>
     </dependencies>
 
     <build>

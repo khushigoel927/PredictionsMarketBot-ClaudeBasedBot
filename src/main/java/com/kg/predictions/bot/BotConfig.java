@@ -34,11 +34,23 @@ public final class BotConfig {
     public final int materialMoveCents;      // only re-price when fair moves this much
     public final int pitchChangeCooldownSec; // skip trading this long after a bullpen change
 
+    // --- account-wide risk (enforced by RiskEnforcer for every decider) ---
+    public final int maxAccountExposureCents; // cap on total open-position value (0 = disabled)
+    public final int minCashReserveCents;     // never spend account cash below this
+
+    // --- AI decision engine (ClaudeDecider) ---
+    public final boolean aiEnabled;       // AI_ENABLED=false -> deterministic only
+    public final String  aiModel;         // Claude model id
+    public final int     aiTimeoutSeconds; // per-call client timeout
+    public final int     aiMaxCallsPerDay; // hard daily call budget (cost kill switch)
+
     private BotConfig(Set<String> allowedEnvs, boolean enabled, double winProbFloor,
                       int minEdgeCents, int maxPriceCents, int minInning,
                       int maxContractsPerOrder, int maxContractsPerGame, int maxBidsPerGame,
                       int cycleSeconds, int rePriceMinIntervalSec, int materialMoveCents,
-                      int pitchChangeCooldownSec) {
+                      int pitchChangeCooldownSec,
+                      int maxAccountExposureCents, int minCashReserveCents,
+                      boolean aiEnabled, String aiModel, int aiTimeoutSeconds, int aiMaxCallsPerDay) {
         this.allowedEnvs = allowedEnvs;
         this.enabled = enabled;
         this.winProbFloor = winProbFloor;
@@ -52,6 +64,12 @@ public final class BotConfig {
         this.rePriceMinIntervalSec = rePriceMinIntervalSec;
         this.materialMoveCents = materialMoveCents;
         this.pitchChangeCooldownSec = pitchChangeCooldownSec;
+        this.maxAccountExposureCents = maxAccountExposureCents;
+        this.minCashReserveCents = minCashReserveCents;
+        this.aiEnabled = aiEnabled;
+        this.aiModel = aiModel;
+        this.aiTimeoutSeconds = aiTimeoutSeconds;
+        this.aiMaxCallsPerDay = aiMaxCallsPerDay;
     }
 
     /** Moderate defaults, with environment gating read from {@code BOT_TRADING_ENVS}. */
@@ -69,8 +87,29 @@ public final class BotConfig {
                 10,     // cycleSeconds
                 15,     // rePriceMinIntervalSec
                 2,      // materialMoveCents
-                90      // pitchChangeCooldownSec
+                90,     // pitchChangeCooldownSec
+                envInt("BOT_MAX_ACCOUNT_EXPOSURE_CENTS", 50_000), // $500 of open positions
+                envInt("BOT_MIN_CASH_RESERVE_CENTS", 0),
+                !"false".equalsIgnoreCase(System.getenv("AI_ENABLED")),
+                envStr("AI_MODEL", "claude-opus-4-8"),
+                envInt("AI_TIMEOUT_SECONDS", 4),
+                envInt("AI_MAX_CALLS_PER_DAY", 500)
         );
+    }
+
+    private static String envStr(String key, String dflt) {
+        String v = System.getenv(key);
+        return (v == null || v.isBlank()) ? dflt : v.trim();
+    }
+
+    private static int envInt(String key, int dflt) {
+        String v = System.getenv(key);
+        if (v == null || v.isBlank()) return dflt;
+        try {
+            return Integer.parseInt(v.trim());
+        } catch (NumberFormatException e) {
+            return dflt;
+        }
     }
 
     /** Parse a comma-separated env list; default to demo only when unset/blank. */

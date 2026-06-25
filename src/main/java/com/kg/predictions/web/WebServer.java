@@ -9,6 +9,10 @@ import com.kg.predictions.app.GamesService.Snapshot;
 import com.kg.predictions.app.QuoteStore;
 import com.kg.predictions.bot.BotConfig;
 import com.kg.predictions.bot.BotStore;
+import com.kg.predictions.bot.ClaudeDecider;
+import com.kg.predictions.bot.DeterministicDecider;
+import com.kg.predictions.bot.RiskEnforcer;
+import com.kg.predictions.bot.TradeDecider;
 import com.kg.predictions.bot.TradingBot;
 import com.kg.predictions.feed.PollingPriceFeed;
 import com.kg.predictions.feed.PriceFeed;
@@ -134,8 +138,22 @@ public final class WebServer {
         if (auth != null) {
             BotConfig botConfig = BotConfig.fromEnv();
             KalshiOrders ordersClient = new KalshiOrders(auth, botConfig.allowedEnvs);
+
+            // Decision engine: Claude when enabled + configured, else the closed-form
+            // model. The deterministic decider is also Claude's fallback on failure.
+            TradeDecider deterministic = new DeterministicDecider();
+            TradeDecider decider = deterministic;
+            if (botConfig.aiEnabled && ClaudeDecider.isConfigured()) {
+                decider = new ClaudeDecider(botConfig, deterministic);
+                System.out.println("Trade decider: Claude (" + botConfig.aiModel
+                        + "), deterministic fallback");
+            } else {
+                System.out.println("Trade decider: deterministic"
+                        + (botConfig.aiEnabled ? " (AI enabled but ANTHROPIC_API_KEY missing)" : ""));
+            }
+
             bot = new TradingBot(botConfig, ordersClient, portfolio, new MlbLiveClient(),
-                    quoteStore, botStore, this::snapshotQuietly);
+                    quoteStore, botStore, this::snapshotQuietly, decider, new RiskEnforcer());
             bot.start();
         } else {
             System.out.println("Trading bot: idle (no Kalshi credentials)");

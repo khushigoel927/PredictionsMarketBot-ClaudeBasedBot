@@ -6,6 +6,7 @@ import com.kg.predictions.bot.BotStore.GameBotState;
 import com.kg.predictions.kalshi.KalshiEnv;
 import com.kg.predictions.kalshi.KalshiOrders;
 import com.kg.predictions.kalshi.KalshiPortfolio;
+import com.kg.predictions.kalshi.KalshiPortfolio.Balance;
 import com.kg.predictions.kalshi.KalshiPortfolio.Position;
 import com.kg.predictions.mlb.MlbLiveClient;
 import com.kg.predictions.model.Game;
@@ -14,6 +15,7 @@ import com.kg.predictions.model.LiveState;
 import com.kg.predictions.model.Quote;
 
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -41,6 +43,8 @@ public final class TradingBot {
     private final QuoteStore quoteStore;
     private final BotStore botStore;
     private final Supplier<Snapshot> snapshotSupplier;
+    private final TradeDecider decider;
+    private final RiskEnforcer enforcer;
 
     private final ScheduledExecutorService scheduler =
             Executors.newSingleThreadScheduledExecutor(r -> {
@@ -54,7 +58,8 @@ public final class TradingBot {
 
     public TradingBot(BotConfig config, KalshiOrders orders, KalshiPortfolio portfolio,
                       MlbLiveClient mlbLive, QuoteStore quoteStore, BotStore botStore,
-                      Supplier<Snapshot> snapshotSupplier) {
+                      Supplier<Snapshot> snapshotSupplier, TradeDecider decider,
+                      RiskEnforcer enforcer) {
         this.config = config;
         this.orders = orders;
         this.portfolio = portfolio;
@@ -62,6 +67,8 @@ public final class TradingBot {
         this.quoteStore = quoteStore;
         this.botStore = botStore;
         this.snapshotSupplier = snapshotSupplier;
+        this.decider = decider;
+        this.enforcer = enforcer;
     }
 
     /** Arms the bot if allowed; otherwise logs why it stays idle. */
@@ -103,19 +110,21 @@ public final class TradingBot {
         if (snap == null) return;
 
         Map<String, Position> positions = fetchPositionsQuietly();
+        Balance balance = fetchBalanceQuietly();
         long now = System.currentTimeMillis();
 
         for (Game g : snap.games()) {
             if (g.gamePk() == 0) continue; // unmatched to an MLB game
             try {
-                processGame(g, positions, now);
+                processGame(g, positions, balance, now);
             } catch (Exception e) {
                 System.err.println("[bot] " + g.eventId() + ": " + e.getMessage());
             }
         }
     }
 
-    private void processGame(Game g, Map<String, Position> positions, long now) throws Exception {
+    private void processGame(Game g, Map<String, Position> positions, Balance balance, long now)
+            throws Exception {
         LiveState ls = mlbLive.fetchLiveState(g.gamePk());
         if (!ls.live() || ls.inning() < config.minInning) return;
 
@@ -124,7 +133,7 @@ public final class TradingBot {
 
         // Lock to a side once we've started trading a game; otherwise pick the favorite.
         boolean homeSide = (w != null && w.locked) ? w.homeSide : (pHome >= 0.5);
-        double p = homeSide ? pHome : 1.0 - pHome;
+        double pDet = homeSide ? pHome : 1.0 - pHome;
         Quote q = homeSide ? g.home() : g.away();
 
         // Bullpen change → brief cooldown to avoid trading into post-change uncertainty.
@@ -135,34 +144,45 @@ public final class TradingBot {
 
         int yesBid = bid(q);
         int yesAsk = ask(q);
-        int fairCents = (int) Math.round(p * 100);
+        int fairDet = (int) Math.round(pDet * 100);
         int held = positions.getOrDefault(q.marketId(), new Position(0, 0)).count();
 
-        boolean canTrade =
-                p >= config.winProbFloor
-                && yesAsk > 0 && yesAsk <= config.maxPriceCents
-                && (fairCents - yesAsk) >= config.minEdgeCents
-                && (w == null || (now >= w.cooldownUntilMs && w.bidsPlaced < config.maxBidsPerGame))
+        // Cheap structural + deterministic candidacy pre-screen. This is the cost
+        // gate: only spend an API call on games the closed-form model already likes.
+        boolean cooldownOk = (w == null) || now >= w.cooldownUntilMs;
+        boolean capsOk = (w == null || w.bidsPlaced < config.maxBidsPerGame)
                 && held < config.maxContractsPerGame;
+        boolean candidate = cooldownOk && capsOk
+                && yesAsk > 0 && yesAsk <= config.maxPriceCents
+                && pDet >= config.winProbFloor
+                && (fairDet - yesAsk) >= config.minEdgeCents;
 
-        if (canTrade) {
-            // Careful maker price: rest below the ask, below fair by the edge margin.
-            int makerPrice = Math.min(Math.min(yesBid + 1, fairCents - config.minEdgeCents), yesAsk - 1);
-            makerPrice = Math.max(1, Math.min(makerPrice, config.maxPriceCents));
-
-            boolean edgePreserved = (fairCents - makerPrice) >= config.minEdgeCents && makerPrice >= 1;
-            if (edgePreserved) {
+        if (candidate) {
+            // The decider judges (Claude on the happy path, deterministic fallback);
+            // the enforcer then clamps its suggestion to every hard risk limit.
+            DecisionContext ctx = new DecisionContext(
+                    g.eventId(), q.marketId(), q.teamAbbrev(), homeSide, ls,
+                    yesBid, yesAsk, q.impliedChancePct(), held,
+                    w != null ? w.bidsPlaced : 0,
+                    balance.cashCents(), balance.portfolioValueCents(), config);
+            Optional<TradeIntent> intent = enforcer.enforce(ctx, decider.decide(ctx));
+            if (intent.isPresent()) {
                 w = ensureWork(g, homeSide, q);
-                maybePlace(w, q, makerPrice, fairCents, held, now);
+                maybePlace(w, q, intent.get(), now);
             }
         }
 
-        publish(g, w, q, p, positions);
+        publish(g, w, q, pDet, positions);
     }
 
-    /** Place or re-price the single resting order for this game, honoring pacing + caps. */
-    private void maybePlace(GameWork w, Quote q, int makerPrice, int fairCents, int held, long now)
-            throws Exception {
+    /** Place or re-price the single resting order for this game, honoring pacing + caps.
+     *  The intent is already risk-clamped by {@link RiskEnforcer}. */
+    private void maybePlace(GameWork w, Quote q, TradeIntent intent, long now) throws Exception {
+        int makerPrice = intent.makerPriceCents();
+        int fairCents = intent.fairCents();
+        int size = intent.contracts();
+        if (size <= 0) return;
+
         boolean materialMove = Math.abs(fairCents - w.lastFairCents) >= config.materialMoveCents;
         boolean priceChanged = w.openOrderPriceCents != makerPrice;
         boolean pacedOk = now - w.lastActionMs >= config.rePriceMinIntervalSec * 1000L;
@@ -171,9 +191,6 @@ public final class TradingBot {
         if (w.openOrderId != null && !materialMove) return;          // fair hasn't moved enough to re-price
         if (!pacedOk) return;                                        // respect min interval
         if (w.bidsPlaced >= config.maxBidsPerGame) return;
-
-        int size = Math.min(config.maxContractsPerOrder, config.maxContractsPerGame - held);
-        if (size <= 0) return;
 
         if (w.openOrderId != null) {
             try { orders.cancel(w.openOrderId); } catch (Exception ignore) { } // cancels don't count as bids
@@ -188,8 +205,8 @@ public final class TradingBot {
             w.bidsPlaced++;             // a "bid" = one successful placement
             w.lastActionMs = now;
             w.lastFairCents = fairCents;
-            System.out.printf("[bot] %s: bid #%d  %s yes @ %d¢ x%d  (fair %d¢)%n",
-                    w.eventTicker, w.bidsPlaced, q.teamAbbrev(), makerPrice, size, fairCents);
+            System.out.printf("[bot] %s: bid #%d  %s yes @ %d¢ x%d  (fair %d¢, %s)%n",
+                    w.eventTicker, w.bidsPlaced, q.teamAbbrev(), makerPrice, size, fairCents, intent.source());
         } catch (Exception e) {
             // e.g. post-only would cross, or transient error -> treat as skip, no bid counted
             w.openOrderId = null;
@@ -222,6 +239,16 @@ public final class TradingBot {
             return portfolio.fetchPositions();
         } catch (Exception e) {
             return Map.of();
+        }
+    }
+
+    /** Account balance, or zeroed on failure — which fail-closes the cash/exposure
+     *  caps in {@link RiskEnforcer} so the bot won't trade blind to its balance. */
+    private Balance fetchBalanceQuietly() {
+        try {
+            return portfolio.fetchBalance();
+        } catch (Exception e) {
+            return new Balance(0, 0);
         }
     }
 
