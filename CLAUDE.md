@@ -47,13 +47,48 @@ a strong edge. It needs credentials (to place orders) and is **environment-gated
 - `BOT_ENABLED=false` disables the bot entirely.
 - Startup logs `Trading bot: ARMED for environment '<env>'` or why it's idle/disabled.
 
-Flow: `TradingBot` (own scheduler) → per cycle, for each matched live game (uses
-`Game.gamePk` → `MlbLiveClient`) computes `WinProbability.homeWinProb` → if model WP ≥ 0.78,
-edge ≥ 5¢, ask ≤ 92¢, caps not hit → rests a `post_only` limit (maker) via `KalshiOrders`.
+Flow: `TradingBot` (own scheduler) → per cycle, fetch positions + account `Balance` once,
+then for each matched live game (uses `Game.gamePk` → `MlbLiveClient`):
+1. **Pre-screen** (cheap, no API call) — `WinProbability.homeWinProb` for side selection +
+   candidacy: WP ≥ 0.78, edge ≥ 5¢, ask ≤ 92¢, cooldown/caps OK. This is also the cost gate
+   for the AI path (only candidates that clear it reach Claude).
+2. **Decide** — hand a `DecisionContext` to the configured `TradeDecider`, which returns a
+   `RawDecision` (its own win-prob estimate + suggested price/size/reasoning).
+3. **Enforce** — `RiskEnforcer` clamps that suggestion to every hard limit and returns an
+   `Optional<TradeIntent>` (see below).
+4. **Place** — `maybePlace` rests a `post_only` limit (maker) via `KalshiOrders`, honoring
+   pacing (`rePriceMinIntervalSec`, `materialMoveCents`).
+
 Per-game caps: ≤100 placements ("bids"), ≤50 contracts. State published to `BotStore` →
 shown per-game in `/api/games` `bot` object → 🤖 row in the UI (bids + expected payoff).
-`WinProbability` is analytical (RE24 + Poisson convolution) — an approximation, not a
-profit guarantee.
+
+### Decision engine (`TradeDecider` seam + `RiskEnforcer`)
+
+The trade decision is pluggable. `TradeDecider` has two implementations:
+- `DeterministicDecider` — the closed-form `WinProbability` (RE24 + Poisson convolution) +
+  edge logic. The original engine; also the **fallback**.
+- `ClaudeDecider` — sends market context to the Claude API (Anthropic Java SDK,
+  `claude-opus-4-8`, **structured outputs** via a typed `AiDecision` record) and gets back a
+  trade/no-trade decision with its own win-prob estimate + reasoning. On any timeout, rate
+  limit, malformed/out-of-range response, or exhausted daily call budget it **falls back to
+  `DeterministicDecider`**. `WebServer.startFeed` selects it when `AI_ENABLED` (default true)
+  and `ANTHROPIC_API_KEY` are set; otherwise the bot is deterministic-only.
+
+**`RiskEnforcer` is the single authority for hard limits** — it runs *after* the decider and
+intersects the decider's suggestion with the risk envelope (win-prob floor, `maxPriceCents`,
+`minEdgeCents`, maker-below-ask, per-order/per-game caps, plus new account-exposure and
+cash-reserve caps). A decider can decline or be more conservative; it can **never widen a
+limit**, and malformed/out-of-range AI output is treated as a decline. This is what makes
+"the AI can decline a trade but can never bypass a risk limit" hold. `KalshiOrders` still
+re-checks the env gate as defense in depth.
+
+`WinProbability` (and any AI estimate) is an approximation, not a profit guarantee.
+
+AI / risk env vars: `AI_ENABLED` (default on), `AI_MODEL` (`claude-opus-4-8`),
+`AI_TIMEOUT_SECONDS` (4), `AI_MAX_CALLS_PER_DAY` (500), `BOT_MAX_ACCOUNT_EXPOSURE_CENTS`
+(50000 = $500; 0 disables), `BOT_MIN_CASH_RESERVE_CENTS` (0). A failed balance fetch zeroes
+cash/exposure → fail-closes trading that cycle. The only third-party deps are Gson and
+`anthropic-java` (AI path only).
 
 ## What it does
 
@@ -112,8 +147,9 @@ Package map under `src/main/java/com/kg/predictions/`:
 - `kalshi/KalshiPortfolio` — authenticated `GET /portfolio/balance` → cash + portfolio value
 - `resources/index.html` — dashboard; initial paint from `/api/games`, live ticks via SSE
 
-The only third-party dependency is Gson; everything else (HTTP server, WebSocket
-client, RSA signing) is JDK built-in — no framework.
+Third-party dependencies: Gson (always) and `anthropic-java` (only used by the
+optional `ClaudeDecider`); everything else (HTTP server, WebSocket client, RSA
+signing) is JDK built-in — no framework.
 
 ## Key domain facts to know before editing
 
